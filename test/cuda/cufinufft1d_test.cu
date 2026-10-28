@@ -23,7 +23,7 @@ using ::finufft::common::PI;
 
 template<typename T>
 int run_test(int method, int type, int N1, int M, T tol, T checktol, int iflag,
-             double upsampfac) {
+             double upsampfac, int m3storage) {
   // print all the input for debugging
 
   std::cout << std::scientific << std::setprecision(3);
@@ -112,6 +112,7 @@ int run_test(int method, int type, int N1, int M, T tol, T checktol, int iflag,
   opts.gpu_method       = method;
   opts.gpu_maxbatchsize = 1;
   opts.upsampfac        = upsampfac;
+  opts.gpu_m3_storage   = m3storage;
 
   int nmodes[3] = {N1, 1, 1};
   int ntransf   = 1;
@@ -222,8 +223,9 @@ int run_test(int method, int type, int N1, int M, T tol, T checktol, int iflag,
 }
 
 int main(int argc, char *argv[]) {
-  if (argc != 9) {
-    fprintf(stderr, "Usage: cufinufft1d_test method type N1 M tol checktol prec\n"
+  if (argc != 9 && argc != 10) {
+    fprintf(stderr, "Usage: cufinufft1d_test method type N1 M tol checktol prec "
+                    "upsampfac [m3storage]\n"
                     "Arguments:\n"
                     "  method: One of\n"
                     "    1: nupts driven\n"
@@ -235,7 +237,8 @@ int main(int argc, char *argv[]) {
                     "  tol: NUFFT tolerance\n"
                     "  checktol:  relative error to pass test\n"
                     "  precision: f or d\n"
-                    "  upsampfac: upsampling factor\n");
+                    "  upsampfac: upsampling factor\n"
+                    "  m3storage: gpu_m3_storage for method 3 (default 0)\n");
     return 1;
   }
   const int method       = atoi(argv[1]);
@@ -247,10 +250,13 @@ int main(int argc, char *argv[]) {
   const int iflag        = 1;
   const char prec        = argv[7][0];
   const double upsampfac = atof(argv[8]);
+  const int m3storage    = argc > 9 ? atoi(argv[9]) : 0;
   if (prec == 'f')
-    return run_test<float>(method, type, N1, M, tol, checktol, iflag, upsampfac);
+    return run_test<float>(method, type, N1, M, tol, checktol, iflag, upsampfac,
+                           m3storage);
   else if (prec == 'd')
-    return run_test<double>(method, type, N1, M, tol, checktol, iflag, upsampfac);
+    return run_test<double>(method, type, N1, M, tol, checktol, iflag, upsampfac,
+                            m3storage);
   else
     return -1;
 }

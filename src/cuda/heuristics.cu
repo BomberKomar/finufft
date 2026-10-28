@@ -82,6 +82,13 @@ static int integer_root(double value, int dim) {
   return r;
 }
 
+// Method 3 bin before it is shrunk to fit shared memory (see valley_bin below).
+static int method3_target_bin(int dim) {
+  if (dim == 1) return 256;
+  if (dim == 2) return 16;
+  return 6;
+}
+
 // Function to find bin_size_x == bin_size_y
 // where bin_size_x * bin_size_y * bin_size_z < mem_size
 template<typename T> int find_bin_size(std::size_t mem_size, int dim, int ns) {
@@ -232,13 +239,8 @@ void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int d
     // low-valley pick therefore transfers across devices: bin 256/16/6, capped by the
     // largest tile that fits.
     const auto valley_bin    = [&] {
-      const int target = [&] {
-        if (dim == 1) return 256;
-        if (dim == 2) return 16;
-        return 6;
-      }();
       const int tile_mem = std::max(0, shmem_limit - derived_np * shmem_per_pt);
-      return std::min(target, find_bin_size<T>(tile_mem, dim, ns));
+      return std::min(method3_target_bin(dim), find_bin_size<T>(tile_mem, dim, ns));
     };
 
     const char *note = "";
@@ -295,6 +297,50 @@ void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int d
 }
 
 template<typename T>
+std::size_t method3_global_block_bytes(int dim, int ns, const cufinufft_opts &opts) {
+  // Same layout as in shared memory, rounded up to 16 bytes so that each block's
+  // buffer is aligned for cuda_complex<T>.
+  const auto bytes = shared_memory_required<T>(
+      dim, ns, opts.gpu_binsizex, opts.gpu_binsizey, opts.gpu_binsizez, opts.gpu_np);
+  return (bytes + 15) / 16 * 16;
+}
+
+template<typename T>
+void cufinufft_setup_method3_global(int dim, int ns, cufinufft_opts *opts) {
+  // Global memory does not limit the tile, so unset bins get the full target bin and
+  // np gets 32, as in shared memory.
+  const int bin = method3_target_bin(dim);
+  if (opts->gpu_binsizex == 0) opts->gpu_binsizex = bin;
+  if (opts->gpu_binsizey == 0) opts->gpu_binsizey = (dim >= 2) ? bin : 1;
+  if (opts->gpu_binsizez == 0) opts->gpu_binsizez = (dim >= 3) ? bin : 1;
+  if (opts->gpu_np == 0) opts->gpu_np = 32;
+  if (opts->gpu_np % 16 != 0) {
+    fprintf(stderr,
+            "[cufinufft] Invalid gpu_np (%d) for Method 3: should be a multiple of 16.\n",
+            opts->gpu_np);
+    throw finufft::exception(FINUFFT_ERR_INVALID_ARGUMENT);
+  }
+  // The kernel indexes tile cells with int.
+  const int pad      = 2 * ((ns + 1) / 2);
+  const int bins[3]  = {opts->gpu_binsizex, opts->gpu_binsizey, opts->gpu_binsizez};
+  std::int64_t cells = 1;
+  for (int d = 0; d < dim; ++d) cells *= std::int64_t(bins[d]) + pad;
+  const std::size_t bytes = method3_global_block_bytes<T>(dim, ns, *opts);
+  if (cells > std::numeric_limits<int>::max() / 2 || bytes > method3_global_budget) {
+    fprintf(stderr,
+            "[cufinufft] Method 3 tile %dx%dx%d needs %zu bytes of global memory per "
+            "block, more than the %zu-byte limit.\n",
+            bins[0], bins[1], bins[2], bytes, method3_global_budget);
+    throw finufft::exception(FINUFFT_ERR_MAXNALLOC);
+  }
+  opts->gpu_m3_storage = 2;
+  if (opts->debug >= 1)
+    printf("[cufinufft] Method 3: dim=%d, ns=%d, bin=%dx%dx%d, np=%d (global)\n", dim, ns,
+           bins[0], bins[1], bins[2], opts->gpu_np);
+  if (opts->debug >= 2) printf("  Global memory: %zu bytes per block\n", bytes);
+}
+
+template<typename T>
 int choose_batchsize(const GpuCapabilities &gpu, const cufinufft_opts &opts, int ntransf,
                      std::int64_t nf) {
   // Cap at ntransf: a larger batch would make cuFFT transform grids that are then
@@ -327,6 +373,10 @@ template void cufinufft_setup_binsize<float>(const GpuCapabilities &, int type, 
 template void cufinufft_setup_binsize<double>(const GpuCapabilities &, int type, int ns,
                                               int dim, const CUFINUFFT_BIGINT *mstu,
                                               cufinufft_opts *opts);
+template std::size_t method3_global_block_bytes<float>(int, int, const cufinufft_opts &);
+template std::size_t method3_global_block_bytes<double>(int, int, const cufinufft_opts &);
+template void cufinufft_setup_method3_global<float>(int, int, cufinufft_opts *);
+template void cufinufft_setup_method3_global<double>(int, int, cufinufft_opts *);
 template int choose_batchsize<float>(const GpuCapabilities &, const cufinufft_opts &, int,
                                      std::int64_t);
 template int choose_batchsize<double>(const GpuCapabilities &, const cufinufft_opts &,

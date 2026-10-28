@@ -270,6 +270,11 @@ cufinufft_plan_t<T>::cufinufft_plan_t(int type_, int dim_, const int *nmodes, in
             __func__, opts.gpu_maxsubprobsize);
     throw finufft::exception(FINUFFT_ERR_INVALID_ARGUMENT);
   }
+  if (opts.gpu_m3_storage < 0 || opts.gpu_m3_storage > 2) {
+    fprintf(stderr, "[%s] Invalid gpu_m3_storage (%d): should be 0, 1 or 2.\n", __func__,
+            opts.gpu_m3_storage);
+    throw finufft::exception(FINUFFT_ERR_INVALID_ARGUMENT);
+  }
 
   if (!warned_pools && !gpu.memory_pools_supported && opts.gpu_stream != nullptr) {
     fprintf(stderr,
@@ -321,18 +326,38 @@ cufinufft_plan_t<T>::cufinufft_plan_t(int type_, int dim_, const int *nmodes, in
       // Default to method 2 (SM) for type 1/3, otherwise method 1 (GM).
       opts.gpu_method = (type == 1 || type == 3) ? 2 : 1;
     }
-    try {
-      cufinufft_setup_binsize<T>(gpu, type, spopts.nspread, dim, mstu.data(), &opts);
-    } catch (const std::runtime_error &e) {
-      if (auto_method) {
-        // Auto-selection of SM failed, fall back to GM and try again.
-        opts.gpu_method = 1;
+    // Method 3 tile storage (gpu_m3_storage): 1 shared, 2 global, 0 shared if the tile
+    // fits, else global.
+    const bool method3 = opts.gpu_method == 3;
+    if (!method3) opts.gpu_m3_storage = 0;
+    const cufinufft_opts requested = opts;
+    bool use_global                = method3 && opts.gpu_m3_storage == 2;
+    if (!use_global) {
+      try {
         cufinufft_setup_binsize<T>(gpu, type, spopts.nspread, dim, mstu.data(), &opts);
-      } else {
-        // User-specified method failed, or the fallback GM method failed.
-        fprintf(stderr, "%s, method %d\n", e.what(), opts.gpu_method);
-        throw finufft::exception(FINUFFT_ERR_INSUFFICIENT_SHMEM);
+        if (method3) opts.gpu_m3_storage = 1;
+      } catch (const std::runtime_error &e) {
+        if (auto_method) {
+          // Auto-selection of SM failed, fall back to GM and try again.
+          opts.gpu_method = 1;
+          cufinufft_setup_binsize<T>(gpu, type, spopts.nspread, dim, mstu.data(), &opts);
+        } else if (method3 && opts.gpu_m3_storage == 0) {
+          if (opts.debug) printf("%s; Method 3 uses global memory\n", e.what());
+          use_global = true;
+        } else {
+          // User-specified method failed, or the fallback GM method failed.
+          fprintf(stderr, "%s, method %d\n", e.what(), opts.gpu_method);
+          throw finufft::exception(FINUFFT_ERR_INSUFFICIENT_SHMEM);
+        }
       }
+    }
+    if (use_global) {
+      // Use the user's bins and np again: the shared-memory setup may have changed them.
+      opts.gpu_binsizex = requested.gpu_binsizex;
+      opts.gpu_binsizey = requested.gpu_binsizey;
+      opts.gpu_binsizez = requested.gpu_binsizez;
+      opts.gpu_np       = requested.gpu_np;
+      cufinufft_setup_method3_global<T>(dim, spopts.nspread, &opts);
     }
     THROW_IF_CUDA_ERROR();
   }

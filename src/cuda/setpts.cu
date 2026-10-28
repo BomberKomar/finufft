@@ -1,6 +1,7 @@
 // "setpts" stage: cufinufft_plan_t<T>::setpts and the type-1/2 helper.
 // Mirrors CPU src/setpts.cpp.
 
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 
@@ -72,9 +73,25 @@ Notes: the type T means either single or double, matching the
 
   indexSort();
 
+  if (opts.gpu_method == 3 && opts.gpu_m3_storage == 2) allocate_method3_scratch();
+
   if (opts.debug) {
     printf("[cufinufft] plan->M=%d\n", M);
   }
+}
+
+template<typename T> void cufinufft_plan_t<T>::allocate_method3_scratch() {
+  // One buffer per block, at most method3_global_blocks_per_sm blocks per SM. Each
+  // block reuses its buffer for many subproblems, so memory does not grow with them.
+  using namespace cufinufft::common;
+  const std::size_t per_block = method3_global_block_bytes<T>(dim, spopts.nspread, opts);
+  const std::int64_t per_device =
+      std::int64_t(method3_global_blocks_per_sm) * std::max(1, gpu.multiprocessor_count);
+  const std::int64_t blocks = std::min({std::int64_t(totalnumsubprob), per_device,
+                                        std::int64_t(method3_global_budget / per_block)});
+  method3_blocks            = int(std::max<std::int64_t>(blocks, 1));
+  const std::size_t bytes   = std::size_t(method3_blocks) * per_block;
+  if (method3_scratch.size() != bytes) method3_scratch.resize(bytes);
 }
 
 template<typename T>

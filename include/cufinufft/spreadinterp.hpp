@@ -261,26 +261,6 @@ __device__ auto get_padded_subgrid_info(const cuda::std::array<int, 3> &binsizes
   return cuda::std::make_tuple(padded_size, total);
 }
 
-// Given a flat index in a local padded subgrid, compute its location in the global grid.
-template<int ndim, int ns>
-__device__ int output_index_from_flat_local_index(
-    int flatidx, const cuda::std::array<int, ndim> &padded_size,
-    const cuda::std::array<int, ndim> &offset, const cuda::std::array<int, 3> &nf) {
-  constexpr auto ns_2 = (ns + 1) / 2;
-
-  int outidx    = 0;
-  int outstride = 1;
-  for (int idim = 0; idim < ndim; ++idim) {
-    int idx0 = flatidx % padded_size[idim];
-    int idx  = idx0 + offset[idim] - ns_2;
-    idx      = idx < 0 ? idx + nf[idim] : (idx >= nf[idim] ? idx - nf[idim] : idx);
-    outidx += idx * outstride;
-    outstride *= nf[idim];
-    flatidx /= padded_size[idim];
-  }
-  return outidx;
-}
-
 /* ------------------------- Interpolation section ------------------------------ */
 
 // Iterates over all locations in a local subgrid, and for all pairs of

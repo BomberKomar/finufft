@@ -106,6 +106,7 @@ def _get_NufftOpts():
         ("gpu_stream", c_void_p),
         ("modeord", c_int),
         ("gpu_np", c_int),
+        ("gpu_m3_storage", c_int),
         ("debug", c_int),
     ]
     return fields
