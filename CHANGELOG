@@ -4,6 +4,11 @@ Please wrap at 80 chars per line.
 
 v2.6.0-dev
 
+* cuFINUFFT: new option `gpu_m3_storage` for `gpu_method=3`, where each block's
+  tile is kept. 0: shared memory, or global memory if the tile does not fit
+  (plan creation used to fail with `FINUFFT_ERR_INSUFFICIENT_SHMEM`); 1: shared
+  memory only; 2: global memory, with bins 256, 16x16 or 6x6x6 by default.
+  Global memory use is at most 4 blocks per SM and 64 MiB per plan. (Vasyliev)
 * The kernel Fourier series table (deconvolution factors) no longer depends on
   nthreads; at tol 1e-12 the error at 2 threads was 6.6x that at 1 thread.
   onedim_fseries_kernel now splits the outputs into fixed blocks of

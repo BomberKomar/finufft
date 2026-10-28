@@ -1052,6 +1052,9 @@ typedef std::complex<float> fcomplex;
      else if (strcmp(fname[ifield],"gpu_np") == 0) {
        oc->gpu_np = (int)round(*mxGetPr(mxGetFieldByNumber(om,idx,ifield)));
      }
+     else if (strcmp(fname[ifield],"gpu_m3_storage") == 0) {
+       oc->gpu_m3_storage = (int)round(*mxGetPr(mxGetFieldByNumber(om,idx,ifield)));
+     }
      /* matlab-only field, handled in cufinufft_plan.m... */
      else if (strcmp(fname[ifield],"floatprec") == 0) {
        continue;

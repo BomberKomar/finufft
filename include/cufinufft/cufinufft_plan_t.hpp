@@ -374,6 +374,12 @@ private:
   gpu_array<int> numnupts{0, alloc};
   gpu_array<int> subprob_to_nupts{0, alloc};
 
+  // Method 3 in global memory (gpu_m3_storage == 2): one buffer per launched block,
+  // for method3_blocks blocks.
+  gpu_array<char> method3_scratch{0, alloc};
+  int method3_blocks = 0;
+  void allocate_method3_scratch();
+
   cufft_plan fftplan;
   cudaStream_t stream = 0;
 

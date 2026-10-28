@@ -412,7 +412,7 @@ Algorithm performance options
 
 * ``gpu_method=2`` : for spreading only, ie, type 1 transforms, uses a shared memory output-block driven method, referred to as SM in our paper. Has no effect for interpolation (type 2 transforms).
 
-* ``gpu_method=3`` : for spreading only, ie, type 1 transforms, uses a shared memory output-block driven method with a different algorithm referred as OD.
+* ``gpu_method=3`` : for spreading only, ie, type 1 and 3 transforms, uses an output-block driven method with a different algorithm referred as OD. Each block adds its points into a tile (its bin plus padding) in shared memory or, see ``gpu_m3_storage`` below, in global memory.
 
 * ``gpu_method>3`` : (various upsupported experimental methods due to Melody Shih, not for regular users. (``4`` is a block gather method of possible interest.)
 
@@ -431,6 +431,14 @@ Algorithm performance options
 **gpu_stream**: ``cudaStream_t`` (cast to ``void*``) on which all of the plan's work is issued; ``nullptr`` (the default) means the default stream. See :ref:`CUDA streams<gpu_streams>`.
 
 **gpu_np**: Min batch size used for ``method 3`` (output-driven, OD). It has to be a multiple of 16. It controls how much of shared memory is left as GPU cache instead of being manually populated. Default is usually best.
+
+**gpu_m3_storage**: where ``gpu_method=3`` keeps each block's tile.
+
+* ``gpu_m3_storage=0`` : shared memory. If the tile does not fit, global memory instead of an error (the default).
+
+* ``gpu_m3_storage=1`` : shared memory only. A tile that does not fit is an error (``FINUFFT_ERR_INSUFFICIENT_SHMEM``).
+
+* ``gpu_m3_storage=2`` : global memory. The tile size is then not limited by shared memory, so unset bin sizes always default to 256 (1D), 16x16 (2D) or 6x6x6 (3D). A plan uses at most 64 MiB of global memory for this. Shared memory is usually faster. Global memory can be faster for wide kernels (small tolerances), mostly in 3D double precision, when the shared tile is so large that only one block fits per SM, or has to be made smaller to fit.
 
 
 Default options for GPU

@@ -37,6 +37,9 @@ typedef struct cufinufft_opts { // see cufinufft_default_opts() for defaults
 
   int gpu_np;  // min batch_size for Output Driven
 
+  int gpu_m3_storage; // Output Driven tile: 0 shared memory, or global if it does not
+                      // fit; 1 shared only; 2 global
+
   int debug;   // 0: silent, 1: plan-setup info, 2: more (incl. shared-mem usage)
 } cufinufft_opts;
 

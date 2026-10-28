@@ -79,6 +79,46 @@ int main() {
   rc = check_rc("insufficient shmem", rc, FINUFFT_ERR_INSUFFICIENT_SHMEM, 8);
   if (rc) return rc;
 
+  // A Method 3 bin of 32^3 needs over 256 KB (32^3 cells x 8 bytes), more than the
+  // shared memory of a block: storage 1 -> expect FINUFFT_ERR_INSUFFICIENT_SHMEM;
+  // storage 0 -> runs in global memory.
+  cufinufft_default_opts(&opts);
+  opts.gpu_method     = 3;
+  opts.gpu_binsizex   = 32;
+  opts.gpu_binsizey   = 32;
+  opts.gpu_binsizez   = 32;
+  opts.gpu_m3_storage = 1;
+  rc                  = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
+  rc = check_rc("method 3 shared only", rc, FINUFFT_ERR_INSUFFICIENT_SHMEM, 10);
+  if (rc) return rc;
+  opts.gpu_m3_storage = 0;
+  rc                  = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
+  rc                  = check_rc("method 3 global fallback", rc, CUFINUFFT_SUCCESS, 11);
+  if (rc) return rc;
+  cufinufftf_destroy(fplan);
+
+  // Invalid gpu_m3_storage -> expect FINUFFT_ERR_INVALID_ARGUMENT
+  opts.gpu_m3_storage = 3;
+  rc                  = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
+  rc = check_rc("gpu_m3_storage invalid", rc, FINUFFT_ERR_INVALID_ARGUMENT, 12);
+  if (rc) return rc;
+
+  // Global storage, gpu_np not a multiple of 16 -> expect FINUFFT_ERR_INVALID_ARGUMENT
+  opts.gpu_m3_storage = 2;
+  opts.gpu_np         = 24;
+  rc                  = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
+  rc = check_rc("method 3 global np", rc, FINUFFT_ERR_INVALID_ARGUMENT, 13);
+  if (rc) return rc;
+
+  // Global tile over the 64 MiB scratch budget -> expect FINUFFT_ERR_MAXNALLOC
+  opts.gpu_np       = 0;
+  opts.gpu_binsizex = 256;
+  opts.gpu_binsizey = 256;
+  opts.gpu_binsizez = 256;
+  rc                = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
+  rc                = check_rc("method 3 global budget", rc, FINUFFT_ERR_MAXNALLOC, 14);
+  if (rc) return rc;
+
   // Destroy null -> expect FINUFFT_ERR_PLAN_NOTVALID
   rc = cufinufft_destroy(NULL);
   rc = check_rc("destroy null", rc, FINUFFT_ERR_PLAN_NOTVALID, 21);
