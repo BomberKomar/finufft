@@ -79,44 +79,48 @@ int main() {
   rc = check_rc("insufficient shmem", rc, FINUFFT_ERR_INSUFFICIENT_SHMEM, 8);
   if (rc) return rc;
 
-  // A Method 3 bin of 32^3 needs over 256 KB (32^3 cells x 8 bytes), more than the
-  // shared memory of a block: storage 1 -> expect FINUFFT_ERR_INSUFFICIENT_SHMEM;
-  // storage 0 -> runs in global memory.
+  // Method 3 tile of 4x the shared memory (8-byte cells) -> expect CUFINUFFT_SUCCESS
+  int device = 0;
+  int smem   = 0;
+  if (cudaGetDevice(&device) != cudaSuccess ||
+      cudaDeviceGetAttribute(&smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device) !=
+          cudaSuccess) {
+    fprintf(stderr, "method 3 global memory: cannot read the shared memory size\n");
+    return 10;
+  }
+  int bin = 1;
+  while (bin * bin * bin < smem / 2) ++bin;
   cufinufft_default_opts(&opts);
-  opts.gpu_method     = 3;
-  opts.gpu_binsizex   = 32;
-  opts.gpu_binsizey   = 32;
-  opts.gpu_binsizez   = 32;
-  opts.gpu_m3_storage = 1;
-  rc                  = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
-  rc = check_rc("method 3 shared only", rc, FINUFFT_ERR_INSUFFICIENT_SHMEM, 10);
-  if (rc) return rc;
-  opts.gpu_m3_storage = 0;
-  rc                  = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
-  rc                  = check_rc("method 3 global fallback", rc, CUFINUFFT_SUCCESS, 11);
+  opts.gpu_method   = 3;
+  opts.gpu_binsizex = bin;
+  opts.gpu_binsizey = bin;
+  opts.gpu_binsizez = bin;
+  rc                = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
+  rc                = check_rc("method 3 global memory", rc, CUFINUFFT_SUCCESS, 10);
   if (rc) return rc;
   cufinufftf_destroy(fplan);
 
-  // Invalid gpu_m3_storage -> expect FINUFFT_ERR_INVALID_ARGUMENT
-  opts.gpu_m3_storage = 3;
-  rc                  = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
-  rc = check_rc("gpu_m3_storage invalid", rc, FINUFFT_ERR_INVALID_ARGUMENT, 12);
+  // np points over the shared memory -> expect FINUFFT_ERR_INSUFFICIENT_SHMEM
+  opts.gpu_np = smem;
+  rc          = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
+  rc          = check_rc("method 3 global np", rc, FINUFFT_ERR_INSUFFICIENT_SHMEM, 11);
   if (rc) return rc;
 
-  // Global storage, gpu_np not a multiple of 16 -> expect FINUFFT_ERR_INVALID_ARGUMENT
-  opts.gpu_m3_storage = 2;
-  opts.gpu_np         = 24;
-  rc                  = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
-  rc = check_rc("method 3 global np", rc, FINUFFT_ERR_INVALID_ARGUMENT, 13);
-  if (rc) return rc;
-
-  // Global tile over the 64 MiB scratch budget -> expect FINUFFT_ERR_MAXNALLOC
+  // Tile over 64 MB -> expect FINUFFT_ERR_MAXNALLOC
   opts.gpu_np       = 0;
   opts.gpu_binsizex = 256;
   opts.gpu_binsizey = 256;
   opts.gpu_binsizez = 256;
   rc                = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
-  rc                = check_rc("method 3 global budget", rc, FINUFFT_ERR_MAXNALLOC, 14);
+  rc                = check_rc("method 3 global limit", rc, FINUFFT_ERR_MAXNALLOC, 12);
+  if (rc) return rc;
+
+  // Method 3 negative bin -> expect FINUFFT_ERR_INVALID_ARGUMENT
+  cufinufft_default_opts(&opts);
+  opts.gpu_method   = 3;
+  opts.gpu_binsizex = -1;
+  rc                = cufinufftf_makeplan(1, 3, N, 1, 1, 1e-5f, &fplan, &opts);
+  rc = check_rc("method 3 negative bin", rc, FINUFFT_ERR_INVALID_ARGUMENT, 13);
   if (rc) return rc;
 
   // Destroy null -> expect FINUFFT_ERR_PLAN_NOTVALID

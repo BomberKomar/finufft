@@ -24,7 +24,7 @@ using ::finufft::common::PI;
 
 template<typename T>
 int run_test(int method, int type, int N1, int N2, int N3, int M, T tol, T checktol,
-             int iflag, double upsampfac, int m3storage) {
+             int iflag, double upsampfac, int binsize, int kerevalmeth) {
   std::cout << std::scientific << std::setprecision(3);
 
   thrust::host_vector<T> x(M), y(M), z(M), s{}, t{}, u{};
@@ -119,9 +119,11 @@ int run_test(int method, int type, int N1, int N2, int N3, int M, T tol, T check
   cufinufft_default_opts(&opts);
 
   opts.gpu_method      = method;
-  opts.gpu_kerevalmeth = 1;
+  opts.gpu_kerevalmeth = kerevalmeth;
   opts.upsampfac       = upsampfac;
-  opts.gpu_m3_storage  = m3storage;
+  opts.gpu_binsizex    = binsize;
+  opts.gpu_binsizey    = binsize;
+  opts.gpu_binsizez    = binsize;
   int nmodes[3]        = {N1, N2, N3};
   int ntransf          = 1;
   cudaEventRecord(start);
@@ -243,9 +245,9 @@ int run_test(int method, int type, int N1, int N2, int N3, int M, T tol, T check
 }
 
 int main(int argc, char *argv[]) {
-  if (argc != 11 && argc != 12) {
+  if (argc < 11 || argc > 13) {
     fprintf(stderr, "Usage: cufinufft3d_test method type N1 N2 N3 M tol checktol prec "
-                    "upsampfac [m3storage]\n"
+                    "upsampfac [binsize [kerevalmeth]]\n"
                     "Arguments:\n"
                     "  method: One of\n"
                     "    1: nupts driven,\n"
@@ -259,7 +261,8 @@ int main(int argc, char *argv[]) {
                     "  checktol:  relative error to pass test\n"
                     "  prec:  'f' or 'd' (float/double)\n"
                     "  upsamplefac: upsampling factor\n"
-                    "  m3storage: gpu_m3_storage for method 3 (default 0)\n");
+                    "  binsize: gpu_binsize in every dimension (default 0: auto)\n"
+                    "  kerevalmeth: gpu_kerevalmeth, 0: direct, 1: Horner (default)\n");
     return 1;
   }
   const int method       = atoi(argv[1]);
@@ -272,15 +275,16 @@ int main(int argc, char *argv[]) {
   const double checktol  = atof(argv[8]);
   const char prec        = argv[9][0];
   const double upsampfac = atof(argv[10]);
-  const int m3storage    = argc > 11 ? atoi(argv[11]) : 0;
+  const int binsize      = argc > 11 ? atoi(argv[11]) : 0;
+  const int kerevalmeth  = argc > 12 ? atoi(argv[12]) : 1;
   const int iflag        = 1;
 
   if (prec == 'f')
     return run_test<float>(method, type, N1, N2, N3, M, tol, checktol, iflag, upsampfac,
-                           m3storage);
+                           binsize, kerevalmeth);
   else if (prec == 'd')
     return run_test<double>(method, type, N1, N2, N3, M, tol, checktol, iflag, upsampfac,
-                            m3storage);
+                            binsize, kerevalmeth);
   else
     return -1;
 }

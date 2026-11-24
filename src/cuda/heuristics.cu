@@ -82,7 +82,14 @@ static int integer_root(double value, int dim) {
   return r;
 }
 
-// Method 3 bin before it is shrunk to fit shared memory (see valley_bin below).
+// Points the derived pick stages per batch: one warp. Larger np costs shared
+// memory and occupancy without adding work.
+static constexpr int method3_default_np = 32;
+
+static bool has_user_bin(const cufinufft_opts &opts) {
+  return (opts.gpu_binsizex | opts.gpu_binsizey | opts.gpu_binsizez) != 0;
+}
+
 static int method3_target_bin(int dim) {
   if (dim == 1) return 256;
   if (dim == 2) return 16;
@@ -224,54 +231,19 @@ void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int d
   }
 
   case 3: {
+    const auto config = method3_shared_config<T>(gpu, dim, ns, *opts);
+    if (!config)
+      throw std::runtime_error("[cufinufft] Insufficient shmem for Method 3 (ns=" +
+                               std::to_string(ns) + ", gpu_np=" +
+                               std::to_string(opts->gpu_np) + ")");
     const bool user_np  = (opts->gpu_np != 0);
-    const bool user_bin = (opts->gpu_binsizex | opts->gpu_binsizey | opts->gpu_binsizez);
-
-    // Points the derived pick stages per batch: one warp. Larger np costs shared
-    // memory and occupancy without adding work. The tile is capped against the
-    // memory left after them, not against the whole limit, because the block
-    // allocates tile + derived_np * shmem_per_pt.
-    constexpr int derived_np = 32;
-
-    // The bin response is a broad valley: its lower edge (halo amplification,
-    // (1+2*ceil(ns/2)/bin)^dim work per point) is device-independent, its upper edge
-    // (resident blocks/SM = smem/tile) only rises with more shared memory. A
-    // low-valley pick therefore transfers across devices: bin 256/16/6, capped by the
-    // largest tile that fits.
-    const auto valley_bin    = [&] {
-      const int tile_mem = std::max(0, shmem_limit - derived_np * shmem_per_pt);
-      return std::min(method3_target_bin(dim), find_bin_size<T>(tile_mem, dim, ns));
-    };
-
-    const char *note = "";
-    if (user_np && !user_bin) {
-      const int avail = shmem_limit - opts->gpu_np * shmem_per_pt;
-      if (avail <= 0)
-        throw std::runtime_error(
-            "[cufinufft] gpu_np=" + std::to_string(opts->gpu_np) + " too large");
-      set_bins(find_bin_size<T>(avail, dim, ns));
-      note = "(user np)";
-    } else if (user_bin) {
-      // The bin-size guard rejects a 0 dim: fill the unset dims with the derived pick.
-      set_bins(std::max(1, valley_bin()));
-      if (!user_np) { // fill the shared memory left after the tile
-        const int rem = shmem_limit - int(shared_memory_required<T>(
-                                          dim, ns, opts->gpu_binsizex, opts->gpu_binsizey,
-                                          opts->gpu_binsizez, 0));
-        if (rem < shmem_per_pt * 16)
-          throw std::runtime_error("[cufinufft] User bin too large (no room for np≥16)");
-        opts->gpu_np = std::max(16, (rem / shmem_per_pt) & ~15);
-      }
-      note = user_np ? "(user)" : "(user bin)";
-    } else {
-      const int bin = valley_bin();
-      if (bin < 1)
-        throw std::runtime_error("[cufinufft] Insufficient shmem for Method 3 (ns=" +
-                                 std::to_string(ns) + "). Try Method 1.");
-      set_bins(bin);
-      opts->gpu_np = derived_np;
-    }
-    validate_fit(opts->gpu_np);
+    const bool user_bin = has_user_bin(*opts);
+    const char *note    = user_bin ? (user_np ? "(user)" : "(user bin)")
+                                   : (user_np ? "(user np)" : "");
+    opts->gpu_binsizex  = config->binsize[0];
+    opts->gpu_binsizey  = config->binsize[1];
+    opts->gpu_binsizez  = config->binsize[2];
+    opts->gpu_np        = config->np;
     debug_print(3, opts->gpu_np, note);
     break;
   }
@@ -297,47 +269,117 @@ void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int d
 }
 
 template<typename T>
-std::size_t method3_global_block_bytes(int dim, int ns, const cufinufft_opts &opts) {
-  // Same layout as in shared memory, rounded up to 16 bytes so that each block's
-  // buffer is aligned for cuda_complex<T>.
-  const auto bytes = shared_memory_required<T>(
-      dim, ns, opts.gpu_binsizex, opts.gpu_binsizey, opts.gpu_binsizez, opts.gpu_np);
-  return (bytes + 15) / 16 * 16;
+std::optional<method3_config> method3_shared_config(const GpuCapabilities &gpu, int dim,
+                                                    int ns, const cufinufft_opts &opts) {
+  const int shmem_limit  = gpu.max_smem_per_block_optin;
+  const int shmem_per_pt = static_cast<int>(shared_memory_per_point<T>(dim, ns));
+  const bool user_np     = (opts.gpu_np != 0);
+  const bool user_bin    = has_user_bin(opts);
+
+  // The bin response is a broad valley: its lower edge (halo amplification,
+  // (1+2*ceil(ns/2)/bin)^dim work per point) is device-independent, its upper edge
+  // (resident blocks/SM = smem/tile) only rises with more shared memory. A
+  // low-valley pick therefore transfers across devices: bin 256/16/6, capped by the
+  // largest tile that fits.
+  const auto valley_bin  = [&] {
+    // The tile is capped against the memory left after the points.
+    const int tile_mem = std::max(0, shmem_limit - method3_default_np * shmem_per_pt);
+    return std::min(method3_target_bin(dim), find_bin_size<T>(tile_mem, dim, ns));
+  };
+
+  method3_config c{{opts.gpu_binsizex, opts.gpu_binsizey, opts.gpu_binsizez},
+                   opts.gpu_np};
+  const auto set_bins = [&](int bin) {
+    if (c.binsize[0] == 0) c.binsize[0] = bin;
+    if (c.binsize[1] == 0) c.binsize[1] = (dim >= 2) ? bin : 1;
+    if (c.binsize[2] == 0) c.binsize[2] = (dim >= 3) ? bin : 1;
+  };
+  const auto shmem_needed = [&](int np) {
+    return shared_memory_required<T>(dim, ns, c.binsize[0], c.binsize[1], c.binsize[2],
+                                     np);
+  };
+
+  if (user_np && !user_bin) {
+    const int avail = shmem_limit - c.np * shmem_per_pt;
+    if (avail <= 0) return std::nullopt;
+    set_bins(find_bin_size<T>(avail, dim, ns));
+  } else if (user_bin) {
+    // The bin-size guard rejects a 0 dim: fill the unset dims with the derived pick.
+    set_bins(std::max(1, valley_bin()));
+    if (!user_np) { // fill the shared memory left after the tile
+      const std::size_t tile = shmem_needed(0);
+      if (tile + 16 * std::size_t(shmem_per_pt) > std::size_t(shmem_limit))
+        return std::nullopt;
+      const int rem = shmem_limit - int(tile);
+      c.np          = (rem / shmem_per_pt) & ~15;
+    }
+  } else {
+    set_bins(valley_bin());
+    c.np = method3_default_np;
+  }
+  if (c.binsize[0] < 1 || c.binsize[1] < 1 || c.binsize[2] < 1) return std::nullopt;
+  if (shmem_needed(c.np) > std::size_t(shmem_limit)) return std::nullopt;
+  return c;
 }
 
 template<typename T>
-void cufinufft_setup_method3_global(int dim, int ns, cufinufft_opts *opts) {
-  // Global memory does not limit the tile, so unset bins get the full target bin and
-  // np gets 32, as in shared memory.
+bool method3_uses_global(const GpuCapabilities &gpu, int dim, int ns,
+                         const cufinufft_opts &opts) {
+  const auto shared = method3_shared_config<T>(gpu, dim, ns, opts);
+  if (!shared) return true;
+  return !has_user_bin(opts) && 4 * shared->binsize[0] <= 3 * method3_target_bin(dim);
+}
+
+std::int64_t method3_tile_cells(int dim, int ns, const cufinufft_opts &opts) {
+  const int pad      = 2 * ((ns + 1) / 2);
+  const std::array<int, 3> bins = {opts.gpu_binsizex, opts.gpu_binsizey,
+                                   opts.gpu_binsizez};
+  std::int64_t cells = 1;
+  for (int d = 0; d < dim; ++d) {
+    cells *= std::int64_t(bins[d]) + pad;
+    // already over the budget; stop before overflow
+    if (cells > std::numeric_limits<int>::max()) break;
+  }
+  return cells;
+}
+
+template<typename T>
+void cufinufft_setup_method3_global(const GpuCapabilities &gpu, int dim, int ns,
+                                    cufinufft_opts *opts) {
   const int bin = method3_target_bin(dim);
   if (opts->gpu_binsizex == 0) opts->gpu_binsizex = bin;
   if (opts->gpu_binsizey == 0) opts->gpu_binsizey = (dim >= 2) ? bin : 1;
   if (opts->gpu_binsizez == 0) opts->gpu_binsizez = (dim >= 3) ? bin : 1;
-  if (opts->gpu_np == 0) opts->gpu_np = 32;
-  if (opts->gpu_np % 16 != 0) {
-    fprintf(stderr,
-            "[cufinufft] Invalid gpu_np (%d) for Method 3: should be a multiple of 16.\n",
-            opts->gpu_np);
+  if (opts->gpu_np == 0) opts->gpu_np = method3_default_np;
+  if (opts->gpu_binsizex < 1 || opts->gpu_binsizey < 1 || opts->gpu_binsizez < 1 ||
+      opts->gpu_np < 1) {
+    fprintf(stderr, "[cufinufft] Invalid bin %dx%dx%d or gpu_np (%d) for Method 3.\n",
+            opts->gpu_binsizex, opts->gpu_binsizey, opts->gpu_binsizez, opts->gpu_np);
     throw finufft::exception(FINUFFT_ERR_INVALID_ARGUMENT);
   }
-  // The kernel indexes tile cells with int.
-  const int pad      = 2 * ((ns + 1) / 2);
-  const int bins[3]  = {opts->gpu_binsizex, opts->gpu_binsizey, opts->gpu_binsizez};
-  std::int64_t cells = 1;
-  for (int d = 0; d < dim; ++d) cells *= std::int64_t(bins[d]) + pad;
-  const std::size_t bytes = method3_global_block_bytes<T>(dim, ns, *opts);
-  if (cells > std::numeric_limits<int>::max() / 2 || bytes > method3_global_budget) {
+  const std::size_t points = shared_memory_per_point<T>(dim, ns) * opts->gpu_np;
+  if (points > std::size_t(gpu.max_smem_per_block_optin)) {
     fprintf(stderr,
-            "[cufinufft] Method 3 tile %dx%dx%d needs %zu bytes of global memory per "
-            "block, more than the %zu-byte limit.\n",
-            bins[0], bins[1], bins[2], bytes, method3_global_budget);
+            "[cufinufft] Method 3 with gpu_np=%d needs %zu bytes of shared memory, but "
+            "the device supports only %d bytes.\n",
+            opts->gpu_np, points, gpu.max_smem_per_block_optin);
+    throw finufft::exception(FINUFFT_ERR_INSUFFICIENT_SHMEM);
+  }
+  const std::int64_t cells = method3_tile_cells(dim, ns, *opts);
+  if (cells > std::int64_t(method3_global_budget / sizeof(cuda_complex<T>))) {
+    fprintf(stderr,
+            "[cufinufft] Method 3 tile %dx%dx%d is larger than the %zu-byte limit of "
+            "global memory.\n",
+            opts->gpu_binsizex, opts->gpu_binsizey, opts->gpu_binsizez,
+            method3_global_budget);
     throw finufft::exception(FINUFFT_ERR_MAXNALLOC);
   }
-  opts->gpu_m3_storage = 2;
   if (opts->debug >= 1)
     printf("[cufinufft] Method 3: dim=%d, ns=%d, bin=%dx%dx%d, np=%d (global)\n", dim, ns,
-           bins[0], bins[1], bins[2], opts->gpu_np);
-  if (opts->debug >= 2) printf("  Global memory: %zu bytes per block\n", bytes);
+           opts->gpu_binsizex, opts->gpu_binsizey, opts->gpu_binsizez, opts->gpu_np);
+  if (opts->debug >= 2)
+    printf("  Shmem: %zu/%d bytes, global memory: %zu bytes per block\n", points,
+           gpu.max_smem_per_block_optin, std::size_t(cells) * sizeof(cuda_complex<T>));
 }
 
 template<typename T>
@@ -373,10 +415,18 @@ template void cufinufft_setup_binsize<float>(const GpuCapabilities &, int type, 
 template void cufinufft_setup_binsize<double>(const GpuCapabilities &, int type, int ns,
                                               int dim, const CUFINUFFT_BIGINT *mstu,
                                               cufinufft_opts *opts);
-template std::size_t method3_global_block_bytes<float>(int, int, const cufinufft_opts &);
-template std::size_t method3_global_block_bytes<double>(int, int, const cufinufft_opts &);
-template void cufinufft_setup_method3_global<float>(int, int, cufinufft_opts *);
-template void cufinufft_setup_method3_global<double>(int, int, cufinufft_opts *);
+template std::optional<method3_config> method3_shared_config<float>(
+    const GpuCapabilities &, int, int, const cufinufft_opts &);
+template std::optional<method3_config> method3_shared_config<double>(
+    const GpuCapabilities &, int, int, const cufinufft_opts &);
+template bool method3_uses_global<float>(const GpuCapabilities &, int, int,
+                                         const cufinufft_opts &);
+template bool method3_uses_global<double>(const GpuCapabilities &, int, int,
+                                          const cufinufft_opts &);
+template void cufinufft_setup_method3_global<float>(const GpuCapabilities &, int, int,
+                                                    cufinufft_opts *);
+template void cufinufft_setup_method3_global<double>(const GpuCapabilities &, int, int,
+                                                     cufinufft_opts *);
 template int choose_batchsize<float>(const GpuCapabilities &, const cufinufft_opts &, int,
                                      std::int64_t);
 template int choose_batchsize<double>(const GpuCapabilities &, const cufinufft_opts &,
@@ -385,6 +435,9 @@ template int choose_batchsize<double>(const GpuCapabilities &, const cufinufft_o
 } // namespace cufinufft
 
 template<typename T> std::size_t cufinufft_plan_t<T>::shared_memory_required() const {
+  if (method3_global)
+    return cufinufft::common::shared_memory_per_point<T>(dim, spopts.nspread) *
+           opts.gpu_np;
   return cufinufft::common::shared_memory_required<T>(
       dim, spopts.nspread, opts.gpu_binsizex, opts.gpu_binsizey, opts.gpu_binsizez,
       opts.gpu_np);

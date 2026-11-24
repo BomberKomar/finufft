@@ -219,39 +219,54 @@ function(add_tests PREC REQ_TOL CHECK_TOL UPSAMP)
     )
 endfunction()
 
-# Method 3 in global memory: gpu_m3_storage=2, the last argument.
+# Bins (last argument) whose tile is over 1 MB, too large for shared memory.
 function(add_m3_global_tests PREC REQ_TOL CHECK_TOL)
     add_test(
         NAME cufinufft1d1_test_OD_global_${PREC}
-        COMMAND cufinufft1d_test 3 1 2e3 4e3 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 2
+        COMMAND cufinufft1d_test 3 1 2e3 4e3 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 131072
     )
 
     add_test(
         NAME cufinufft2d1_test_OD_global_${PREC}
-        COMMAND cufinufft2d_test 3 1 1e2 2e2 2e4 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 2
+        COMMAND cufinufft2d_test 3 1 1e2 2e2 2e4 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 384
     )
 
     add_test(
         NAME cufinufft2d3_test_OD_global_${PREC}
-        COMMAND cufinufft2d_test 3 3 1e2 2e2 2e4 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 2
+        COMMAND cufinufft2d_test 3 3 1e2 2e2 2e4 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 384
     )
 
     add_test(
         NAME cufinufft3d1_test_OD_global_${PREC}
-        COMMAND cufinufft3d_test 3 1 2 5 10 20 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 2
+        COMMAND cufinufft3d_test 3 1 2 5 10 20 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 48
     )
 
-    # About 1200 subproblems, more than 4 blocks per SM on up to 300 SMs, so each block
-    # does several.
+    # Direct kernel evaluation (last argument 0).
+    add_test(
+        NAME cufinufft1d1_test_OD_global_direct_${PREC}
+        COMMAND cufinufft1d_test 3 1 2e3 4e3 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 131072 0
+    )
+
+    add_test(
+        NAME cufinufft2d1_test_OD_global_direct_${PREC}
+        COMMAND cufinufft2d_test 3 1 1e2 2e2 2e4 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 384 0
+    )
+
+    add_test(
+        NAME cufinufft3d1_test_OD_global_direct_${PREC}
+        COMMAND cufinufft3d_test 3 1 2 5 10 20 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 48 0
+    )
+
+    # Each block does several subproblems.
     add_test(
         NAME cufinufft3d1_test_OD_global_reuse_${PREC}
-        COMMAND cufinufft3d_test 3 1 32 32 32 3e3 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 2
+        COMMAND cufinufft3d_test 3 1 32 32 32 2e6 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 48
     )
 
-    # A 1D tile (bin 256 plus padding) wider than the fine grid.
+    # A 1D tile wider than the fine grid.
     add_test(
-        NAME cufinufft1d1_test_OD_global_small_${PREC}
-        COMMAND cufinufft1d_test 3 1 24 1e3 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0 2
+        NAME cufinufft1d1_test_OD_small_${PREC}
+        COMMAND cufinufft1d_test 3 1 24 1e3 ${REQ_TOL} ${CHECK_TOL} ${PREC} 2.0
     )
 endfunction()
 
