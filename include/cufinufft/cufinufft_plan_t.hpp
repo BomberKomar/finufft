@@ -375,6 +375,7 @@ private:
   gpu_array<int> subprob_to_nupts{0, alloc};
 
   bool method3_global = false; // tile in global memory
+  std::optional<cufinufft_opts> auto_opts; // gpu_method=0: opts before setup
 
   cufft_plan fftplan;
   cudaStream_t stream = 0;
@@ -393,6 +394,8 @@ private:
   void deconvolve_nd(cuda_complex<T> *fw, cuda_complex<T> *fk, int blksize) const;
 
   void setpts_type12(int M_, const T *d_kx, const T *d_ky, const T *d_kz);
+  void setup_method();
+  void setup_auto_method(int M_);
   void allocate_subprob_state();
   void allocate_nupts();
 

@@ -118,16 +118,6 @@ void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int d
     if (opts->gpu_binsizez == 0) opts->gpu_binsizez = (dim >= 3) ? bin : 1;
   };
 
-  auto validate_fit = [&](int np) {
-    size_t need = shared_memory_required<T>(dim, ns, opts->gpu_binsizex,
-                                            opts->gpu_binsizey, opts->gpu_binsizez, np);
-    if (need > static_cast<size_t>(shmem_limit)) {
-      throw std::runtime_error("[cufinufft] Config exceeds " +
-                               std::to_string(shmem_limit) + " bytes available (needs " +
-                               std::to_string(need) + " bytes)");
-    }
-  };
-
   auto debug_print = [&](int method, int np, const char *note) {
     if (opts->debug < 1) return;
     printf("[cufinufft] Method %d: dim=%d, ns=%d, bin=%dx%dx%d", method, dim, ns,
@@ -209,22 +199,17 @@ void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int d
   }
 
   case 2: {
-    // One subproblem is one block's batch of <= maxsubprobsize points, so size the
-    // bin to fill a subproblem at the ~1 point/cell design density: bin^dim = msub,
-    // capped by the largest padded tile that fits shared memory. Dense f64 3D on
-    // large-smem parts wants a smaller bin, but its optimum is device-jagged and
-    // method 3 serves those cells faster, so no table is worth reintroducing.
     if (opts->gpu_maxsubprobsize < 1)
       throw std::runtime_error("[cufinufft] Invalid gpu_maxsubprobsize (" +
                                std::to_string(opts->gpu_maxsubprobsize) +
                                ") for Method 2.");
-    const int bin = std::min(integer_root(double(opts->gpu_maxsubprobsize), dim),
-                             find_bin_size<T>(shmem_limit, dim, ns));
-    if (bin < 1)
+    const auto bins = method2_shared_config<T>(gpu, dim, ns, *opts);
+    if (!bins)
       throw std::runtime_error("[cufinufft] Insufficient shmem for Method 2 (ns=" +
                                std::to_string(ns) + "). Try Method 1.");
-    set_bins(bin);
-    validate_fit(0);
+    opts->gpu_binsizex = (*bins)[0];
+    opts->gpu_binsizey = (*bins)[1];
+    opts->gpu_binsizez = (*bins)[2];
     debug_print(2, 0, "");
     break;
   }
@@ -265,6 +250,27 @@ void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int d
     throw std::runtime_error(
         "[cufinufft] BUG: Invalid bin sizes (method=" + std::to_string(opts->gpu_method) +
         ", ns=" + std::to_string(ns) + ")");
+}
+
+template<typename T>
+std::optional<std::array<int, 3>> method2_shared_config(
+    const GpuCapabilities &gpu, int dim, int ns, const cufinufft_opts &opts) {
+  // One subproblem is one block's batch of <= maxsubprobsize points, so size the
+  // bin to fill a subproblem at the ~1 point/cell design density: bin^dim = msub,
+  // capped by the largest padded tile that fits shared memory. Dense f64 3D on
+  // large-smem parts wants a smaller bin, but its optimum is device-jagged and
+  // method 3 serves those cells faster, so no table is worth reintroducing.
+  const int shmem_limit = gpu.max_smem_per_block_optin;
+  const int bin         = std::min(integer_root(double(opts.gpu_maxsubprobsize), dim),
+                                   find_bin_size<T>(shmem_limit, dim, ns));
+  std::array<int, 3> bins{opts.gpu_binsizex, opts.gpu_binsizey, opts.gpu_binsizez};
+  for (int d = 0; d < 3; ++d)
+    if (bins[d] == 0) bins[d] = d < dim ? bin : 1;
+  if (bins[0] < 1 || bins[1] < 1 || bins[2] < 1) return std::nullopt;
+  if (shared_memory_required<T>(dim, ns, bins[0], bins[1], bins[2], 0) >
+      std::size_t(shmem_limit))
+    return std::nullopt;
+  return bins;
 }
 
 template<typename T>
@@ -408,12 +414,38 @@ int choose_batchsize(const GpuCapabilities &gpu, const cufinufft_opts &opts, int
   return 1 + (ntransf - 1) / nbatch;
 }
 
+// Thresholds fitted to timings of methods 1, 2 and 3 on four GPUs.
+template<typename T>
+int choose_method(const GpuCapabilities &gpu, int type, int dim, int ns, std::int64_t M,
+                  std::int64_t nf, int ntransf, const cufinufft_opts &opts) {
+  const std::int64_t sms = std::max(1, gpu.multiprocessor_count);
+  const int method       = [&] {
+    if (type == 2) return dim < 3 && nf > 5120 * sms ? 2 : 1;
+    if (M <= 64 * sms) return 1;
+    if (dim == 1) {
+      const double grid_bytes = double(nf) * sizeof(cuda_complex<T>) * ntransf;
+      if (grid_bytes <= gpu.l2_cache_size / 8.0) return M <= 256 * sms ? 1 : 2;
+      return ns <= 8 ? 2 : 3;
+    }
+    return 50 * M <= nf ? 1 : 3;
+  }();
+  if (method == 2 && !method2_shared_config<T>(gpu, dim, ns, opts)) return 1;
+  // Without user bins, Method 3 keeps its tile in global memory if it does not fit.
+  if (method == 3 && has_user_bin(opts) && !method3_shared_config<T>(gpu, dim, ns, opts))
+    return 1;
+  return method;
+}
+
 template void cufinufft_setup_binsize<float>(const GpuCapabilities &, int type, int ns,
                                              int dim, const CUFINUFFT_BIGINT *mstu,
                                              cufinufft_opts *opts);
 template void cufinufft_setup_binsize<double>(const GpuCapabilities &, int type, int ns,
                                               int dim, const CUFINUFFT_BIGINT *mstu,
                                               cufinufft_opts *opts);
+template std::optional<std::array<int, 3>> method2_shared_config<float>(
+    const GpuCapabilities &, int, int, const cufinufft_opts &);
+template std::optional<std::array<int, 3>> method2_shared_config<double>(
+    const GpuCapabilities &, int, int, const cufinufft_opts &);
 template std::optional<method3_config> method3_shared_config<float>(
     const GpuCapabilities &, int, int, const cufinufft_opts &);
 template std::optional<method3_config> method3_shared_config<double>(
@@ -430,6 +462,10 @@ template int choose_batchsize<float>(const GpuCapabilities &, const cufinufft_op
                                      std::int64_t);
 template int choose_batchsize<double>(const GpuCapabilities &, const cufinufft_opts &,
                                       int, std::int64_t);
+template int choose_method<float>(const GpuCapabilities &, int, int, int, std::int64_t,
+                                  std::int64_t, int, const cufinufft_opts &);
+template int choose_method<double>(const GpuCapabilities &, int, int, int, std::int64_t,
+                                   std::int64_t, int, const cufinufft_opts &);
 } // namespace common
 } // namespace cufinufft
 

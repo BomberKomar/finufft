@@ -83,6 +83,10 @@ void cufinufft_plan_t<T>::setpts(int nj, const T *d_kx, const T *d_ky, const T *
   DeviceSwitcher switcher(opts.gpu_device_id);
   // type 1 and type 2 setpts
   if (type == 1 || type == 2) {
+    if (auto_opts) {
+      setup_auto_method(nj);
+      allocate_subprob_state();
+    }
     return setpts_type12(nj, d_kx, d_ky, d_kz);
   }
   // type 3 setpts
@@ -305,6 +309,7 @@ void cufinufft_plan_t<T>::setpts(int nj, const T *d_kx, const T *d_ky, const T *
     // since GPU memory is expensive, we should free it as soon as possible
   }
 
+  if (auto_opts) setup_auto_method(M);
   allocate_subprob_state();
 
   setpts_type12(M, kxyz[0], kxyz[1], kxyz[2]);
@@ -312,7 +317,7 @@ void cufinufft_plan_t<T>::setpts(int nj, const T *d_kx, const T *d_ky, const T *
     int t2modes[]               = {nf123[0], nf123[1], nf123[2]};
     cufinufft_opts t2opts       = opts;
     t2opts.gpu_spreadinterponly = 0;
-    t2opts.gpu_method           = 0;
+    t2opts.gpu_method           = 1; // gpu_method=0 picks in setpts, not setpts_type12
     // The outer plan owns the batch decision; the inner type 2 must process each batch
     // in one go rather than subdividing it again (it would need an fw buffer per
     // sub-batch, and the outer spread already materialized the whole batch).

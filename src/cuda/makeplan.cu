@@ -171,8 +171,6 @@ template<typename T> void cufinufft_plan_t<T>::allocate_subprob_state() {
     std::cerr << "[allocate] error: invalid method\n";
     throw finufft::exception(FINUFFT_ERR_METHOD_NOTVALID);
   }
-  if (!opts.gpu_spreadinterponly)
-    for (int idim = 0; idim < dim; ++idim) fwkerhalf[idim].resize(nf123[idim] / 2 + 1);
 }
 template void cufinufft_plan_t<float>::allocate_subprob_state();
 template void cufinufft_plan_t<double>::allocate_subprob_state();
@@ -216,6 +214,34 @@ template<typename T> void cufinufft_plan_t<T>::allocate_nupts() {
 }
 template void cufinufft_plan_t<float>::allocate_nupts();
 template void cufinufft_plan_t<double>::allocate_nupts();
+
+// Sets up the bins and np of opts.gpu_method, and method3_global.
+template<typename T> void cufinufft_plan_t<T>::setup_method() {
+  using namespace cufinufft::common;
+  method3_global =
+      opts.gpu_method == 3 && method3_uses_global<T>(gpu, dim, spopts.nspread, opts);
+  try {
+    if (!method3_global)
+      cufinufft_setup_binsize<T>(gpu, type, spopts.nspread, dim, mstu.data(), &opts);
+  } catch (const std::runtime_error &e) {
+    // User-specified method failed.
+    fprintf(stderr, "%s, method %d\n", e.what(), opts.gpu_method);
+    throw finufft::exception(FINUFFT_ERR_INSUFFICIENT_SHMEM);
+  }
+  if (method3_global) cufinufft_setup_method3_global<T>(gpu, dim, spopts.nspread, &opts);
+}
+template void cufinufft_plan_t<float>::setup_method();
+template void cufinufft_plan_t<double>::setup_method();
+
+// gpu_method=0: sets up the method choose_method picks for M_ points.
+template<typename T> void cufinufft_plan_t<T>::setup_auto_method(int M_) {
+  opts            = *auto_opts;
+  opts.gpu_method = cufinufft::common::choose_method<T>(gpu, type, dim, spopts.nspread,
+                                                        M_, nf, ntransf, opts);
+  setup_method();
+}
+template void cufinufft_plan_t<float>::setup_auto_method(int);
+template void cufinufft_plan_t<double>::setup_auto_method(int);
 
 template<typename T>
 cufinufft_plan_t<T>::cufinufft_plan_t(int type_, int dim_, const int *nmodes, int iflag_,
@@ -314,33 +340,12 @@ cufinufft_plan_t<T>::cufinufft_plan_t(int type_, int dim_, const int *nmodes, in
     printf("[cufinufft] spreader options:\n");
     printf("[cufinufft] nspread: %d\n", spopts.nspread);
   }
-  {
-    /* Automatically set GPU method. */
-    const bool auto_method = opts.gpu_method == 0;
-    if (auto_method) {
-      // Default to method 2 (SM) for type 1/3, otherwise method 1 (GM).
-      opts.gpu_method = (type == 1 || type == 3) ? 2 : 1;
-    }
-    method3_global = opts.gpu_method == 3 &&
-                     method3_uses_global<T>(gpu, dim, spopts.nspread, opts);
-    try {
-      if (!method3_global)
-        cufinufft_setup_binsize<T>(gpu, type, spopts.nspread, dim, mstu.data(), &opts);
-    } catch (const std::runtime_error &e) {
-      if (auto_method) {
-        // Auto-selection of SM failed, fall back to GM and try again.
-        opts.gpu_method = 1;
-        cufinufft_setup_binsize<T>(gpu, type, spopts.nspread, dim, mstu.data(), &opts);
-      } else {
-        // User-specified method failed, or the fallback GM method failed.
-        fprintf(stderr, "%s, method %d\n", e.what(), opts.gpu_method);
-        throw finufft::exception(FINUFFT_ERR_INSUFFICIENT_SHMEM);
-      }
-    }
-    if (method3_global)
-      cufinufft_setup_method3_global<T>(gpu, dim, spopts.nspread, &opts);
-    THROW_IF_CUDA_ERROR();
-  }
+  // gpu_method=0: setpts picks the method once M is known.
+  if (opts.gpu_method == 0)
+    auto_opts = opts;
+  else
+    setup_method();
+  THROW_IF_CUDA_ERROR();
   // Bin size and memory info now printed in cufinufft_setup_binsize() (common.cu)
   // Additional runtime info at debug level 2
   if (opts.debug >= 2) {
@@ -397,7 +402,8 @@ cufinufft_plan_t<T>::cufinufft_plan_t(int type_, int dim_, const int *nmodes, in
       printf("[cufinufft] batchsize=%d (nf=%d ntransf=%d maxbatchsize=%d)\n", batchsize,
              nf, ntransf, opts.gpu_maxbatchsize);
 
-    allocate_subprob_state();
+    // The bin arrays depend on the method, which gpu_method=0 picks in setpts.
+    if (!auto_opts) allocate_subprob_state();
 
     // We don't need any cuFFT plans or kernel values if we are only spreading /
     // interpolating
@@ -430,6 +436,7 @@ cufinufft_plan_t<T>::cufinufft_plan_t(int type_, int dim_, const int *nmodes, in
                    d_fseries_precomp_phase.begin());
       thrust::copy(fseries_precomp_f, fseries_precomp_f + 3 * MAX_NQUAD,
                    d_fseries_precomp_f.begin());
+      for (int idim = 0; idim < dim; ++idim) fwkerhalf[idim].resize(nf123[idim] / 2 + 1);
       // the full fseries is done on the GPU here
       fseries_kernel_compute(dim, nf123, d_fseries_precomp_f.data().get(),
                              d_fseries_precomp_phase.data().get(), fwkerhalf,

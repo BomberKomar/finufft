@@ -31,6 +31,11 @@ template<typename T>
 void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int dim,
                              const CUFINUFFT_BIGINT *mstu, cufinufft_opts *opts);
 
+// Method 2 bins that fit in shared memory, if any.
+template<typename T>
+std::optional<std::array<int, 3>> method2_shared_config(
+    const GpuCapabilities &gpu, int dim, int ns, const cufinufft_opts &opts);
+
 struct method3_config {
   std::array<int, 3> binsize;
   int np;
@@ -66,6 +71,12 @@ inline constexpr int method3_global_blocks_per_sm  = 4;
 template<typename T>
 int choose_batchsize(const GpuCapabilities &gpu, const cufinufft_opts &opts, int ntransf,
                      std::int64_t nf);
+
+// Method that gpu_method=0 uses for M points on a fine grid of nf points: 1, 2 or 3;
+// method 1 if the picked one does not fit.
+template<typename T>
+int choose_method(const GpuCapabilities &gpu, int type, int dim, int ns, std::int64_t M,
+                  std::int64_t nf, int ntransf, const cufinufft_opts &opts);
 
 // Opt this kernel into the dynamic shared memory the plan needs, throwing
 // FINUFFT_ERR_INSUFFICIENT_SHMEM if the device cannot satisfy the request.
