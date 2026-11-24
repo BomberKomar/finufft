@@ -25,7 +25,7 @@ using ::finufft::common::PI;
 
 template<typename T>
 int run_test(int method, int type, int N1, int N2, int M, T tol, T checktol, int iflag,
-             double upsampfac) {
+             double upsampfac, int binsize, int kerevalmeth) {
   std::cout << std::scientific << std::setprecision(3);
 
   thrust::host_vector<T> x(M), y(M), s{}, t{};
@@ -114,6 +114,9 @@ int run_test(int method, int type, int N1, int N2, int M, T tol, T checktol, int
   opts.gpu_method       = method;
   opts.gpu_maxbatchsize = 1;
   opts.upsampfac        = upsampfac;
+  opts.gpu_binsizex     = binsize;
+  opts.gpu_binsizey     = binsize;
+  opts.gpu_kerevalmeth  = kerevalmeth;
   int nmodes[3]         = {N1, N2, 1};
   int ntransf           = 1;
   cudaEventRecord(start);
@@ -226,8 +229,9 @@ int run_test(int method, int type, int N1, int N2, int M, T tol, T checktol, int
 }
 
 int main(int argc, char *argv[]) {
-  if (argc != 10) {
-    fprintf(stderr, "Usage: cufinufft2d1_test method N1 N2 M tol checktol\n"
+  if (argc < 10 || argc > 12) {
+    fprintf(stderr, "Usage: cufinufft2d_test method type N1 N2 M tol checktol prec "
+                    "upsampfac [binsize [kerevalmeth]]\n"
                     "Arguments:\n"
                     "  method: One of\n"
                     "    1: nupts driven,\n"
@@ -239,7 +243,9 @@ int main(int argc, char *argv[]) {
                     "  tol: NUFFT tolerance\n"
                     "  checktol: relative error to pass test\n"
                     "  prec:  'f' or 'd' (float/double)\n"
-                    "  upsampfac: upsampling factor\n");
+                    "  upsampfac: upsampling factor\n"
+                    "  binsize: gpu_binsize in every dimension (default 0: auto)\n"
+                    "  kerevalmeth: gpu_kerevalmeth, 0: direct, 1: Horner (default)\n");
     return 1;
   }
   const int method       = atoi(argv[1]);
@@ -251,12 +257,16 @@ int main(int argc, char *argv[]) {
   const double checktol  = atof(argv[7]);
   const char prec        = argv[8][0];
   const double upsampfac = atof(argv[9]);
+  const int binsize      = argc > 10 ? atoi(argv[10]) : 0;
+  const int kerevalmeth  = argc > 11 ? atoi(argv[11]) : 1;
   const int iflag        = 1;
 
   if (prec == 'f')
-    return run_test<float>(method, type, N1, N2, M, tol, checktol, iflag, upsampfac);
+    return run_test<float>(method, type, N1, N2, M, tol, checktol, iflag, upsampfac,
+                           binsize, kerevalmeth);
   else if (prec == 'd')
-    return run_test<double>(method, type, N1, N2, M, tol, checktol, iflag, upsampfac);
+    return run_test<double>(method, type, N1, N2, M, tol, checktol, iflag, upsampfac,
+                            binsize, kerevalmeth);
   else
     return -1;
 }

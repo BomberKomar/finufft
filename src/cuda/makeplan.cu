@@ -321,8 +321,11 @@ cufinufft_plan_t<T>::cufinufft_plan_t(int type_, int dim_, const int *nmodes, in
       // Default to method 2 (SM) for type 1/3, otherwise method 1 (GM).
       opts.gpu_method = (type == 1 || type == 3) ? 2 : 1;
     }
+    method3_global = opts.gpu_method == 3 &&
+                     method3_uses_global<T>(gpu, dim, spopts.nspread, opts);
     try {
-      cufinufft_setup_binsize<T>(gpu, type, spopts.nspread, dim, mstu.data(), &opts);
+      if (!method3_global)
+        cufinufft_setup_binsize<T>(gpu, type, spopts.nspread, dim, mstu.data(), &opts);
     } catch (const std::runtime_error &e) {
       if (auto_method) {
         // Auto-selection of SM failed, fall back to GM and try again.
@@ -334,6 +337,8 @@ cufinufft_plan_t<T>::cufinufft_plan_t(int type_, int dim_, const int *nmodes, in
         throw finufft::exception(FINUFFT_ERR_INSUFFICIENT_SHMEM);
       }
     }
+    if (method3_global)
+      cufinufft_setup_method3_global<T>(gpu, dim, spopts.nspread, &opts);
     THROW_IF_CUDA_ERROR();
   }
   // Bin size and memory info now printed in cufinufft_setup_binsize() (common.cu)

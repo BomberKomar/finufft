@@ -1,9 +1,11 @@
 #ifndef CUFINUFFT_HEURISTICS_HPP
 #define CUFINUFFT_HEURISTICS_HPP
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 
 #include <cuda_runtime.h>
 
@@ -28,6 +30,35 @@ std::size_t shared_memory_required(int dim, int ns, int bin_size_x, int bin_size
 template<typename T>
 void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int dim,
                              const CUFINUFFT_BIGINT *mstu, cufinufft_opts *opts);
+
+struct method3_config {
+  std::array<int, 3> binsize;
+  int np;
+};
+
+// Method 3 bins and np that fit in shared memory, if any.
+template<typename T>
+std::optional<method3_config> method3_shared_config(const GpuCapabilities &gpu, int dim,
+                                                    int ns, const cufinufft_opts &opts);
+
+// Method 3 uses global memory if nothing fits in shared memory, or if the auto bin is
+// capped at 3/4 of its default or less. Global memory is then usually faster.
+template<typename T>
+bool method3_uses_global(const GpuCapabilities &gpu, int dim, int ns,
+                         const cufinufft_opts &opts);
+
+// Throws if the np points do not fit in shared memory or the tile is over
+// method3_global_budget.
+template<typename T>
+void cufinufft_setup_method3_global(const GpuCapabilities &gpu, int dim, int ns,
+                                    cufinufft_opts *opts);
+
+// Cells of the padded tile.
+std::int64_t method3_tile_cells(int dim, int ns, const cufinufft_opts &opts);
+
+// Per-launch limits with the tile in global memory.
+inline constexpr std::size_t method3_global_budget = std::size_t(64) << 20;
+inline constexpr int method3_global_blocks_per_sm  = 4;
 
 // How many transforms to batch into one FFT / spread pass, in [1, ntransf]. Needs the
 // fine grid, so it is called once nf is known.

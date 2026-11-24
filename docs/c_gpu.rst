@@ -412,7 +412,7 @@ Algorithm performance options
 
 * ``gpu_method=2`` : for spreading only, ie, type 1 transforms, uses a shared memory output-block driven method, referred to as SM in our paper. Has no effect for interpolation (type 2 transforms).
 
-* ``gpu_method=3`` : for spreading only, ie, type 1 transforms, uses a shared memory output-block driven method with a different algorithm referred as OD.
+* ``gpu_method=3`` : for spreading only, ie, type 1 transforms, uses a shared memory output-block driven method with a different algorithm referred as OD. Keeps the padded tile in global memory (at most 64 MB) if it does not fit in shared memory or if the auto bin is capped at 3/4 of its default or less.
 
 * ``gpu_method>3`` : (various upsupported experimental methods due to Melody Shih, not for regular users. (``4`` is a block gather method of possible interest.)
 

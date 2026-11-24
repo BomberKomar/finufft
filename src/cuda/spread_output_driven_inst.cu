@@ -14,18 +14,41 @@
 namespace cufinufft {
 namespace spreadinterp {
 
-// Output-driven spreading kernel
-template<typename T, int KEREVALMETH, int ndim, int ns>
-__global__ FINUFFT_FLATTEN void spread_output_driven(
-    cufinufft_gpu_data<T> p, const cuda_complex<T> *c, cuda_complex<T> *fw, int np) {
-  extern __shared__ char sharedbuf[];
+// Parts ordered by alignment, largest first, so each is aligned for any np.
+template<typename T, int ndim, int ns> struct output_driven_scratch {
+  using kernel_data = cuda::std::array<cuda::std::array<T, ns>, ndim>;
+  using local_start = cuda::std::array<int, ndim>;
+  static_assert(alignof(cuda_complex<T>) >= alignof(kernel_data) &&
+                    alignof(kernel_data) >= alignof(local_start),
+                "parts must be ordered by alignment, largest first");
+  static_assert(sizeof(kernel_data) == ndim * ns * sizeof(T) &&
+                    sizeof(local_start) == ndim * sizeof(int),
+                "sizes must match shared_memory_required()");
 
+  cuda_complex<T> *local_subgrid;
+  cuda_complex<T> *nupts_sm;
+  kernel_data *kerevals;
+  local_start *shift;
+
+  __device__ output_driven_scratch(cuda_complex<T> *shared, int tile_cells, int np,
+                                   cuda_complex<T> *global_tile)
+      : local_subgrid(global_tile ? global_tile : shared),
+        nupts_sm(global_tile ? shared : shared + tile_cells),
+        kerevals(reinterpret_cast<kernel_data *>(nupts_sm + np)),
+        shift(reinterpret_cast<local_start *>(kerevals + np)) {}
+};
+
+template<typename T, int KEREVALMETH, int ndim, int ns>
+__device__ FINUFFT_FLATTEN void spread_output_driven_subprob(
+    const cufinufft_gpu_data<T> &p, const cuda_complex<T> *c, cuda_complex<T> *fw, int np,
+    int subpidx, cuda_complex<T> *shared, cuda_complex<T> *global_tile) {
   T sigma   = p.sigma;
   T es_c    = p.es_c;
   T es_beta = p.es_beta;
 
   // assume that bin_size > ns/2;
-  auto info         = compute_subprob_block_info<T, ndim>(p, blockIdx.x);
+  // A block does one subproblem, or several with the tile in global memory.
+  auto info         = compute_subprob_block_info<T, ndim>(p, subpidx);
   auto &binsizes    = info.binsizes;
   auto &offset      = info.offset;
   const int ptstart = info.ptstart;
@@ -38,17 +61,12 @@ __global__ FINUFFT_FLATTEN void spread_output_driven(
 
   auto [padded_size, local_subgrid_size] = get_padded_subgrid_info<ndim, ns>(binsizes);
 
-  using kernel_data = cuda::std::array<cuda::std::array<T, ns>, ndim>;
-  auto *kerevals    = reinterpret_cast<kernel_data *>(sharedbuf);
-  // Offset pointer into sharedbuf after kerevals
-  auto *nupts_sm =
-      reinterpret_cast<cuda_complex<T> *>(sharedbuf + np * sizeof(kernel_data));
-  auto *shift = reinterpret_cast<cuda::std::array<int, ndim> *>(
-      sharedbuf + np * sizeof(kernel_data) + np * sizeof(cuda_complex<T>));
-
-  auto *local_subgrid = reinterpret_cast<cuda_complex<T> *>(
-      sharedbuf + np * sizeof(kernel_data) + np * sizeof(cuda_complex<T>) +
-      np * sizeof(cuda::std::array<int, ndim>));
+  const output_driven_scratch<T, ndim, ns> scratch(shared, local_subgrid_size, np,
+                                                   global_tile);
+  auto *local_subgrid = scratch.local_subgrid;
+  auto *nupts_sm      = scratch.nupts_sm;
+  auto *kerevals      = scratch.kerevals;
+  auto *shift         = scratch.shift;
 
   // set local_subgrid to zero
   for (int i = threadIdx.x; i < local_subgrid_size; i += blockDim.x) {
@@ -96,10 +114,32 @@ __global__ FINUFFT_FLATTEN void spread_output_driven(
     }
   }
   /* write to global memory */
-  for (int n = threadIdx.x; n < local_subgrid_size; n += blockDim.x) {
-    const int outidx =
-        output_index_from_flat_local_index<ndim, ns>(n, padded_size, offset, p.nf123);
-    atomicAddComplexGlobal<T>(fw + outidx, local_subgrid[n]);
+  shared_mem_copy_helper<T, ndim, ns>(
+      binsizes, offset, p.nf123, [fw, local_subgrid](int idx_local, int idx_global) {
+        atomicAddComplexGlobal<T>(fw + idx_global, local_subgrid[idx_local]);
+      });
+}
+
+// Output-driven spreading kernel
+// GLOBAL: fewer blocks than subproblems, each with its own tile in global memory.
+template<typename T, int KEREVALMETH, int ndim, int ns, bool GLOBAL>
+__global__ FINUFFT_FLATTEN void spread_output_driven(
+    cufinufft_gpu_data<T> p, const cuda_complex<T> *c, cuda_complex<T> *fw, int np,
+    cuda_complex<T> *tiles, int tile_cells) {
+  extern __shared__ char sharedbuf[];
+  // Dynamic shared memory has no type.
+  auto *shared = reinterpret_cast<cuda_complex<T> *>(sharedbuf);
+  if constexpr (!GLOBAL) {
+    spread_output_driven_subprob<T, KEREVALMETH, ndim, ns>(p, c, fw, np, blockIdx.x,
+                                                           shared, nullptr);
+  } else {
+    cuda_complex<T> *tile = tiles + std::size_t(blockIdx.x) * tile_cells;
+    for (int subpidx = blockIdx.x; subpidx < p.totalnumsubprob; subpidx += gridDim.x) {
+      spread_output_driven_subprob<T, KEREVALMETH, ndim, ns>(p, c, fw, np, subpidx,
+                                                             shared, tile);
+      // before the next subproblem sets the tile to zero
+      __syncthreads();
+    }
   }
 }
 
@@ -114,19 +154,42 @@ void spread_output_driven_launch(const cufinufft_plan_t<T> &d_plan,
   const auto sharedplanorysize = d_plan.shared_memory_required();
   const int nthreads           = std::min(256, std::max(bufsz, d_plan.opts.gpu_np));
 
+  using cufinufft::common::method3_global_blocks_per_sm;
+  using cufinufft::common::method3_global_budget;
+  const bool global = d_plan.method3_global;
+  const std::int64_t tile_cells =
+      cufinufft::common::method3_tile_cells(ndim, ns, d_plan.opts);
+  std::int64_t nblocks = d_plan.totalnumsubprob;
+  if (global) {
+    const std::int64_t per_device = std::int64_t(method3_global_blocks_per_sm) *
+                                    std::max(1, d_plan.gpu.multiprocessor_count);
+    // >= 1, checked in cufinufft_setup_method3_global
+    const std::int64_t in_budget =
+        method3_global_budget / (tile_cells * sizeof(cuda_complex<T>));
+    nblocks = std::min({nblocks, per_device, in_budget});
+  }
+  // Uninitialized: each subproblem sets its tile to zero.
+  const gpu_scratch<cuda_complex<T>> tiles(global ? std::size_t(nblocks * tile_cells) : 0,
+                                           d_plan.alloc);
+
   const auto launch = [&](auto kernel) {
     cufinufft_set_shared_memory(kernel, d_plan);
     cudaFuncSetSharedMemConfig(kernel, cudaSharedMemBankSizeEightByte);
     THROW_IF_CUDA_ERROR();
     for (std::int64_t t = 0; t < blksize; t++) {
-      kernel<<<d_plan.totalnumsubprob, std::min(256, std::max(bufsz, d_plan.opts.gpu_np)),
-               sharedplanorysize, d_plan.stream>>>(
-          d_plan, c + t * d_plan.M, fw + t * d_plan.nf, d_plan.opts.gpu_np);
+      kernel<<<int(nblocks), nthreads, sharedplanorysize, d_plan.stream>>>(
+          d_plan, c + t * d_plan.M, fw + t * d_plan.nf, d_plan.opts.gpu_np, tiles.data(),
+          int(tile_cells));
       THROW_IF_CUDA_ERROR();
     }
   };
-  (d_plan.opts.gpu_kerevalmeth == 1) ? launch(spread_output_driven<T, 1, ndim, ns>)
-                                     : launch(spread_output_driven<T, 0, ndim, ns>);
+  const bool horner = d_plan.opts.gpu_kerevalmeth == 1;
+  if (global)
+    horner ? launch(spread_output_driven<T, 1, ndim, ns, true>)
+           : launch(spread_output_driven<T, 0, ndim, ns, true>);
+  else
+    horner ? launch(spread_output_driven<T, 1, ndim, ns, false>)
+           : launch(spread_output_driven<T, 0, ndim, ns, false>);
 }
 
 template<typename T, int Ndim> struct SpreadOutputDrivenCaller {

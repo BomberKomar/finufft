@@ -4,6 +4,9 @@ Please wrap at 80 chars per line.
 
 v2.6.0-dev
 
+* cuFINUFFT: `gpu_method=3` keeps its tile in global memory (at most 64 MB) if
+  it does not fit in shared memory, which used to be an error, or if the auto
+  bin is capped at 3/4 of its default or less. (Vasyliev)
 * The kernel Fourier series table (deconvolution factors) no longer depends on
   nthreads; at tol 1e-12 the error at 2 threads was 6.6x that at 1 thread.
   onedim_fseries_kernel now splits the outputs into fixed blocks of

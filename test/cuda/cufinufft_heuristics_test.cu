@@ -25,6 +25,9 @@
 #include <finufft_common/constants.h>
 
 using cufinufft::common::cufinufft_setup_binsize;
+using cufinufft::common::cufinufft_setup_method3_global;
+using cufinufft::common::method3_shared_config;
+using cufinufft::common::method3_uses_global;
 using cufinufft::common::shared_memory_required;
 
 namespace {
@@ -314,6 +317,38 @@ void test_invalid_opts() {
   }
 }
 
+// ---- method 3 storage: shared or global memory ----
+
+void test_method3_storage() {
+  const auto gpu = synthetic(kProfiles[3]);
+  assert(gpu.max_smem_per_block_optin == 101376);
+  auto o = base_opts(3);
+  // 3/4 of the default bin 6 is 4.5: ns 12 is capped at 5 (shared), ns 13 at 3 (global)
+  const auto at12 = method3_shared_config<double>(gpu, 3, 12, o);
+  assert(at12 && at12->binsize[0] == 5 && at12->np == 32);
+  assert(!method3_uses_global<double>(gpu, 3, 12, o));
+  const auto at13 = method3_shared_config<double>(gpu, 3, 13, o);
+  assert(at13 && at13->binsize[0] == 3);
+  assert(method3_uses_global<double>(gpu, 3, 13, o));
+  auto picked = o;
+  cufinufft_setup_binsize<double>(gpu, 1, 13, 3, nullptr, &picked);
+  assert(picked.gpu_binsizex == 3 && picked.gpu_binsizey == 3 &&
+         picked.gpu_binsizez == 3 && picked.gpu_np == at13->np);
+  // a user bin stays shared while it fits
+  o.gpu_binsizex = o.gpu_binsizey = o.gpu_binsizez = 2;
+  assert(!method3_uses_global<double>(gpu, 3, 13, o));
+  o.gpu_binsizex = o.gpu_binsizey = o.gpu_binsizez = 64;
+  assert(!method3_shared_config<double>(gpu, 3, 13, o));
+  assert(method3_uses_global<double>(gpu, 3, 13, o));
+  // a tile over INT_MAX bytes must not overflow int
+  o.gpu_binsizex = o.gpu_binsizey = o.gpu_binsizez = 1024;
+  assert(!method3_shared_config<double>(gpu, 3, 13, o));
+  auto g = base_opts(3);
+  cufinufft_setup_method3_global<double>(gpu, 3, 13, &g);
+  assert(g.gpu_binsizex == 6 && g.gpu_binsizey == 6 && g.gpu_binsizez == 6);
+  assert(g.gpu_np == 32);
+}
+
 } // namespace
 
 int main() {
@@ -322,6 +357,7 @@ int main() {
   run<float>(gpu);
   run<double>(gpu);
   test_bin_index_boundary();
+  test_method3_storage();
   printf("cufinufft_heuristics_test: all assertions passed\n");
   return 0;
 }

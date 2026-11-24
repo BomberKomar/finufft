@@ -374,6 +374,8 @@ private:
   gpu_array<int> numnupts{0, alloc};
   gpu_array<int> subprob_to_nupts{0, alloc};
 
+  bool method3_global = false; // tile in global memory
+
   cufft_plan fftplan;
   cudaStream_t stream = 0;
 

@@ -23,7 +23,7 @@ using ::finufft::common::PI;
 
 template<typename T>
 int run_test(int method, int type, int N1, int M, T tol, T checktol, int iflag,
-             double upsampfac) {
+             double upsampfac, int binsize, int kerevalmeth) {
   // print all the input for debugging
 
   std::cout << std::scientific << std::setprecision(3);
@@ -112,6 +112,8 @@ int run_test(int method, int type, int N1, int M, T tol, T checktol, int iflag,
   opts.gpu_method       = method;
   opts.gpu_maxbatchsize = 1;
   opts.upsampfac        = upsampfac;
+  opts.gpu_binsizex     = binsize;
+  opts.gpu_kerevalmeth  = kerevalmeth;
 
   int nmodes[3] = {N1, 1, 1};
   int ntransf   = 1;
@@ -222,8 +224,9 @@ int run_test(int method, int type, int N1, int M, T tol, T checktol, int iflag,
 }
 
 int main(int argc, char *argv[]) {
-  if (argc != 9) {
-    fprintf(stderr, "Usage: cufinufft1d_test method type N1 M tol checktol prec\n"
+  if (argc < 9 || argc > 11) {
+    fprintf(stderr, "Usage: cufinufft1d_test method type N1 M tol checktol prec "
+                    "upsampfac [binsize [kerevalmeth]]\n"
                     "Arguments:\n"
                     "  method: One of\n"
                     "    1: nupts driven\n"
@@ -235,7 +238,9 @@ int main(int argc, char *argv[]) {
                     "  tol: NUFFT tolerance\n"
                     "  checktol:  relative error to pass test\n"
                     "  precision: f or d\n"
-                    "  upsampfac: upsampling factor\n");
+                    "  upsampfac: upsampling factor\n"
+                    "  binsize: gpu_binsize in every dimension (default 0: auto)\n"
+                    "  kerevalmeth: gpu_kerevalmeth, 0: direct, 1: Horner (default)\n");
     return 1;
   }
   const int method       = atoi(argv[1]);
@@ -247,10 +252,14 @@ int main(int argc, char *argv[]) {
   const int iflag        = 1;
   const char prec        = argv[7][0];
   const double upsampfac = atof(argv[8]);
+  const int binsize      = argc > 9 ? atoi(argv[9]) : 0;
+  const int kerevalmeth  = argc > 10 ? atoi(argv[10]) : 1;
   if (prec == 'f')
-    return run_test<float>(method, type, N1, M, tol, checktol, iflag, upsampfac);
+    return run_test<float>(method, type, N1, M, tol, checktol, iflag, upsampfac, binsize,
+                           kerevalmeth);
   else if (prec == 'd')
-    return run_test<double>(method, type, N1, M, tol, checktol, iflag, upsampfac);
+    return run_test<double>(method, type, N1, M, tol, checktol, iflag, upsampfac, binsize,
+                            kerevalmeth);
   else
     return -1;
 }
