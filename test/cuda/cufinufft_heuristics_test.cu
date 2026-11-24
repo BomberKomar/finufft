@@ -21,9 +21,14 @@
 #include <cuda_runtime.h>
 
 #include <cufinufft.h>
+#include <cufinufft/cufinufft_plan_t.hpp>
 #include <cufinufft/heuristics.hpp>
 #include <finufft_common/constants.h>
 
+#include <thrust/copy.h>
+#include <thrust/device_vector.h>
+
+using cufinufft::common::choose_method;
 using cufinufft::common::cufinufft_setup_binsize;
 using cufinufft::common::cufinufft_setup_method3_global;
 using cufinufft::common::method3_shared_config;
@@ -349,6 +354,87 @@ void test_method3_storage() {
   assert(g.gpu_np == 32);
 }
 
+// ---- method 0: choose_method thresholds, and setpts picking the method ----
+
+void test_choose_method() {
+  const auto gpu        = synthetic(kProfiles[4]); // 36 SMs, 32 MB L2
+  const std::int64_t sm = 36;
+  auto o                = base_opts(0);
+  // up to 64 points per SM: method 1
+  assert(choose_method<float>(gpu, 1, 2, 7, 64 * sm, 1 << 20, 1, o) == 1);
+  // 2D and 3D: method 3 above 1 point per 50 fine-grid points
+  assert(choose_method<float>(gpu, 1, 2, 7, 20971, 1 << 20, 1, o) == 1);
+  assert(choose_method<float>(gpu, 1, 2, 7, 20972, 1 << 20, 1, o) == 3);
+  assert(choose_method<double>(gpu, 3, 3, 13, 20972, 1 << 20, 1, o) == 3);
+  // 1D, all grids in 1/8 of L2 (4 MB): method 2 above 256 points per SM
+  assert(choose_method<float>(gpu, 1, 1, 7, 256 * sm, 1 << 19, 1, o) == 1);
+  assert(choose_method<float>(gpu, 1, 1, 7, 256 * sm + 1, 1 << 19, 1, o) == 2);
+  assert(choose_method<float>(gpu, 1, 1, 7, 256 * sm, 1 << 18, 2, o) == 1);
+  // 1D, grids over 1/8 of L2: method 2 up to ns 8, then method 3
+  assert(choose_method<float>(gpu, 1, 1, 8, 256 * sm, 1 << 18, 3, o) == 2);
+  assert(choose_method<double>(gpu, 1, 1, 8, 256 * sm, 1 << 19, 1, o) == 2);
+  assert(choose_method<double>(gpu, 1, 1, 9, 256 * sm, 1 << 19, 1, o) == 3);
+  // type 2: method 2 in 1D and 2D above 5120 fine-grid points per SM
+  assert(choose_method<float>(gpu, 2, 1, 7, 1, 5120 * sm, 1, o) == 1);
+  assert(choose_method<float>(gpu, 2, 2, 7, 1, 5120 * sm + 1, 1, o) == 2);
+  assert(choose_method<float>(gpu, 2, 3, 7, 1, std::int64_t(1) << 30, 1, o) == 1);
+  // user bins that do not fit the picked method in shared memory: method 1
+  o.gpu_binsizex = 1 << 16;
+  assert(choose_method<float>(gpu, 1, 1, 7, 256 * sm + 1, 1 << 19, 1, o) == 1);
+  o.gpu_binsizex = o.gpu_binsizey = o.gpu_binsizez = 64;
+  assert(choose_method<double>(gpu, 3, 3, 13, 20972, 1 << 20, 1, o) == 1);
+  o.gpu_binsizex = o.gpu_binsizey = o.gpu_binsizez = 2;
+  assert(choose_method<double>(gpu, 3, 3, 13, 20972, 1 << 20, 1, o) == 3);
+}
+
+// One method-0 plan, three point sets: 16 points pick method 1, 16 per fine-grid
+// point pick method 3, then 16 points again. Each must match a method-1 plan.
+void test_method0_setpts() {
+  const int nmodes[3] = {32, 32, 1}; // fine grid 64 x 64
+  const int max_m     = 16 * 64 * 64;
+  auto o              = base_opts(0);
+  cufinufft_plan_t<double> plan(1, 2, nmodes, 1, 1, 1e-6, o);
+  o.gpu_method = 1;
+  cufinufft_plan_t<double> ref(1, 2, nmodes, 1, 1, 1e-6, o);
+
+  std::vector<double> x(max_m), y(max_m);
+  std::vector<cuDoubleComplex> c(max_m);
+  uint32_t s        = 1;
+  const auto rand11 = [&s] {
+    s = s * 1664525u + 1013904223u;
+    return double(s >> 8) / double(1 << 23) - 1;
+  };
+  for (auto &v : x) v = finufft::common::PI * rand11();
+  for (auto &v : y) v = finufft::common::PI * rand11();
+  for (auto &z : c) z = make_cuDoubleComplex(rand11(), rand11());
+  const thrust::device_vector<double> d_x(x.begin(), x.end()), d_y(y.begin(), y.end());
+  thrust::device_vector<cuDoubleComplex> d_c(c.begin(), c.end()), d_fk(32 * 32);
+  const auto transform = [&d_x, &d_y, &d_c, &d_fk](cufinufft_plan_t<double> &p, int M) {
+    p.setpts(M, d_x.data().get(), d_y.data().get(), nullptr, 0, nullptr, nullptr,
+             nullptr);
+    p.execute(d_c.data().get(), d_fk.data().get());
+    std::vector<cuDoubleComplex> fk(d_fk.size());
+    thrust::copy(d_fk.begin(), d_fk.end(), fk.begin());
+    return fk;
+  };
+  for (const int M : {16, max_m, 16}) {
+    const auto fk = transform(plan, M);
+    assert(plan.opts.gpu_method == (M == 16 ? 1 : 3));
+    const auto fk_ref = transform(ref, M);
+    double num = 0, den = 0;
+    for (size_t k = 0; k < fk.size(); ++k) {
+      const double dr = cuCreal(fk[k]) - cuCreal(fk_ref[k]);
+      const double di = cuCimag(fk[k]) - cuCimag(fk_ref[k]);
+      num += dr * dr + di * di;
+      den += cuCreal(fk_ref[k]) * cuCreal(fk_ref[k]) +
+             cuCimag(fk_ref[k]) * cuCimag(fk_ref[k]);
+    }
+    fprintf(stderr, "method 0, M=%d: method %d, rel_l2=%.3g\n", M, plan.opts.gpu_method,
+            std::sqrt(num / den));
+    assert(std::sqrt(num / den) < 1e-8);
+  }
+}
+
 } // namespace
 
 int main() {
@@ -358,6 +444,8 @@ int main() {
   run<double>(gpu);
   test_bin_index_boundary();
   test_method3_storage();
+  test_choose_method();
+  test_method0_setpts();
   printf("cufinufft_heuristics_test: all assertions passed\n");
   return 0;
 }

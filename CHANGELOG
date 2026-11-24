@@ -4,6 +4,10 @@ Please wrap at 80 chars per line.
 
 v2.6.0-dev
 
+* cuFINUFFT: `gpu_method=0` now chooses method 1, 2 or 3 in `setpts`, from the
+  number of points, the fine grid, the kernel width and the device's
+  multiprocessor count and L2 cache, instead of method 2 for types 1 and 3 and
+  method 1 for type 2. (Vasyliev)
 * cuFINUFFT: `gpu_method=3` keeps its tile in global memory (at most 64 MB) if
   it does not fit in shared memory, which used to be an error, or if the auto
   bin is capped at 3/4 of its default or less. (Vasyliev)

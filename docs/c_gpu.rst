@@ -406,7 +406,7 @@ Algorithm performance options
 
 **gpu_method**: Spreader/interpolator algorithm.
 
-* ``gpu_method=0`` : makes an automatic choice of one of the below methods, based on our heuristics.
+* ``gpu_method=0`` : makes an automatic choice of one of the below methods, based on our heuristics. The choice is made in ``setpts``, from the number of nonuniform points, the fine-grid size, the kernel width, and the device's multiprocessor count and L2 cache size.
 
 * ``gpu_method=1`` : uses a nonuniform points-driven method, either unsorted which is referred to as GM in our paper, or sorted which is called GM-sort in our paper, depending on option ``gpu_sort`` below.
 
