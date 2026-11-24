@@ -109,7 +109,6 @@ template<typename T>
 void cufinufft_setup_binsize(const GpuCapabilities &gpu, int type, int ns, int dim,
                              const CUFINUFFT_BIGINT *mstu, cufinufft_opts *opts) {
   const int shmem_limit = gpu.max_smem_per_block_optin;
-  const int shmem_per_pt = static_cast<int>(shared_memory_per_point<T>(dim, ns));
 
   gpu.print_classification(opts->debug);
 
